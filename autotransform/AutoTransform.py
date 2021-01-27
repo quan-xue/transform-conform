@@ -13,7 +13,7 @@ import cv2
 import dlib
 import numpy as np
 from typing import List, Optional, Tuple, Union
-from shapely.geometry import Polygon
+from shapely.geometry import LineString, Polygon
 
 FACIAL_LANDMARK_MODEL_PATH = "/content/drive/MyDrive/transform_conform/shape_predictor_68_face_landmarks.dat"
 OVERLAY_OFFSET_X = 2
@@ -62,33 +62,39 @@ def make_transform_matrix(
     return np.dot(translate_matrix, rotate_scale_matrix)
 
 
-def scale_rotate_translate(
+def scale_rotate_translate_img(
         img: np.array,
-        scale_factor: float,
-        ccw_rotate_rads: float,
-        x_translate: float,
-        y_translate: float,
+        m: np.array,
         crop: Optional[Tuple[int, int]] = None
 ):
     """
     Applies scaling, rotation, and translation to an image in this strict order
     :param img: input image
-    :param scale_factor: scale factor (centered on (0, 0) i.e. top left)
-    :param ccw_rotate_rads: amount to rotate counter-clockwise in radians (centered on (0, 0) i.e. top left)
-    :param x_translate: shifts image to the right
-    :param y_translate: shifts image upwards
+    :param m: transform matrix
     :param crop: crop size from top left, use original size if None
     :return: transformed image
     """
     (height, width) = img.shape[:2]
-
     transformed_image = cv2.warpPerspective(
-        img,
-        make_transform_matrix(scale_factor, ccw_rotate_rads, x_translate, y_translate),
-        (width, height) if crop is None else crop
+        img, m, (width, height) if crop is None else crop
     )
 
     return transformed_image
+
+
+def scale_rotate_translate_coords(
+        coords: np.array,
+        m: np.array
+):
+    """
+    Applies scaling, rotation, and translation to coordinates
+    :param coords: n x 2 array in order of (x, y)
+    :param m: transform matrix
+    :return:
+    """
+    return np.dot(
+        m, np.vstack((coords.transpose(), np.ones(len(coords))))
+    ).transpose()[:, :2]
 
 
 def overlay_landmarks(
@@ -211,15 +217,40 @@ class PortraitAutoTransform:
         :return: fitted image
         """
         input_landmarks = self.predict_landmarks(img)
-        (scale_factor, ccw_rotate_rads, x_translate, y_translate) = self.compute_fit_params(input_landmarks)
+        transform_matrix_0 = make_transform_matrix(*self.compute_fit_params(input_landmarks))
 
-        transformed_image = scale_rotate_translate(
-            img=img,
-            scale_factor=scale_factor,
-            ccw_rotate_rads=ccw_rotate_rads,
-            x_translate=x_translate,
-            y_translate=y_translate,
-            crop=(self.train_width, self.train_height)
+        # This section deals with the case when the ideal cropped image crops out of the the input canvas
+        (height, width) = img.shape[:2]
+        input_corners = np.array([
+            (0, 0), (width, 0), (width, height), (0, height)])
+        transformed_corners = scale_rotate_translate_coords(
+            input_corners, transform_matrix_0)
+        transformed_box = Polygon(
+            zip(transformed_corners[:, 0], -transformed_corners[:, 1])
+        )
+
+        train_corners = np.array([
+            (0, 0), (self.train_width, 0), (self.train_width, self.train_height), (0, self.train_height)])
+        diagonals_from_center = [
+            LineString([
+                (self.train_width / 2, -self.train_height / 2), (x, -y)
+            ]) for (x, y) in train_corners
+        ]
+        min_diagonal_intersect_len = min([
+            transformed_box.intersection(line).length
+            for line in diagonals_from_center
+        ])
+        crop_scale_factor = np.linalg.norm([self.train_width, self.train_height]) / min_diagonal_intersect_len / 2
+        transform_matrix_1 = make_transform_matrix(
+            crop_scale_factor,
+            0,
+            (1 - crop_scale_factor) * self.train_width / 2,
+            (1 - crop_scale_factor) * self.train_height / 2
+        )
+        transform_matrix_combined = np.dot(transform_matrix_1, transform_matrix_0)
+
+        transformed_image = scale_rotate_translate_img(
+            img=img, m=transform_matrix_combined, crop=(self.train_width, self.train_height)
         )
 
         if not debug_mode:
@@ -231,10 +262,9 @@ class PortraitAutoTransform:
             )
             overlaid2 = overlay_landmarks(
                 overlaid1,
-                np.dot(
-                    make_transform_matrix(scale_factor, ccw_rotate_rads, x_translate, y_translate),
-                    np.vstack((input_landmarks.transpose(), np.ones(len(input_landmarks))))
-                ).transpose()[:, :2],
+                scale_rotate_translate_coords(
+                    input_landmarks, transform_matrix_combined
+                ),
                 color=OVERLAY_COLOR_2
             )
 
