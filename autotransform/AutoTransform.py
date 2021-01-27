@@ -239,13 +239,14 @@ class PortraitAutoTransform:
             self,
             img: np.array,
             debug_mode: bool = False,
-            crop_inside_transformed_canvas: bool = False
+            crop_inside_input_canvas: bool = False
     ):
         """
         Fits landmarks of input image to the training image
 
         :param img: input image
         :param debug_mode: if true returns image with training landmarks in green and transformed landmarks in blue
+        :crop_inside_input_canvas: if true, crops the image strictly within the input canvas
         :return: fitted image
         """
         input_landmarks = self.predict_landmarks(img)
@@ -257,7 +258,7 @@ class PortraitAutoTransform:
             np.array([(0, 0), (width, 0), (width, height), (0, height)]),
             transform_matrix_0
         )
-        canvas_scale_factor = self.compute_canvas_scaling(transformed_corners) if crop_inside_transformed_canvas else 1.0
+        canvas_scale_factor = self.compute_canvas_scaling(transformed_corners) if crop_inside_input_canvas else 1.0
         transform_matrix_1 = make_transform_matrix(
             canvas_scale_factor,
             0,
