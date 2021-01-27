@@ -11,6 +11,7 @@ fitted_image = model.fir(<INPUT_IMAGE>)
 
 import cv2
 import dlib
+import warnings
 import numpy as np
 from typing import List, Optional, Tuple, Union
 from shapely.geometry import LineString, Polygon
@@ -29,6 +30,7 @@ LANDMARKS_PICKED = [
     43, 44, 45, 46, 47, 48,  # right eye
     49, 50, 52, 54, 55, 56, 58, 60, # mouth
 ]
+CANVAS_SCALING_WARN_THRESHOLD = 1.1
 
 
 def make_transform_matrix(
@@ -204,10 +206,40 @@ class PortraitAutoTransform:
 
         return scale_factor, -cw_rotate_rads, x_translate, y_translate
 
+    def compute_canvas_scaling(
+            self,
+            canvas_corners: np.array
+    ) -> float:
+        """
+        Let center be (0.5 * train_width, 0.5 * train_height)
+        Given the polygon vertices of some canvas, compute how much it needs to be enlarged from the center
+        so we can crop out a centered rectangle of (train_width, train_height)
+        :param canvas_corners:
+        :return:
+        """
+        canvas_box = Polygon(zip(canvas_corners[:, 0], -canvas_corners[:, 1]))
+
+        train_corners = np.array([
+            (0, 0), (self.train_width, 0), (self.train_width, self.train_height), (0, self.train_height)])
+        diagonals_from_center = [
+            LineString([
+                (self.train_width / 2, -self.train_height / 2), (x, -y)
+            ]) for (x, y) in train_corners
+        ]
+
+        min_diagonal_intersect_len = min([
+            canvas_box.intersection(line).length
+            for line in diagonals_from_center
+        ])
+        canvas_scale_factor = np.linalg.norm([self.train_width, self.train_height]) / min_diagonal_intersect_len / 2
+
+        return canvas_scale_factor
+
     def fit(
             self,
             img: np.array,
-            debug_mode: bool = False
+            debug_mode: bool = False,
+            crop_inside_transformed_canvas: bool = False
     ):
         """
         Fits landmarks of input image to the training image
@@ -221,37 +253,25 @@ class PortraitAutoTransform:
 
         # This section deals with the case when the ideal cropped image crops out of the the input canvas
         (height, width) = img.shape[:2]
-        input_corners = np.array([
-            (0, 0), (width, 0), (width, height), (0, height)])
         transformed_corners = scale_rotate_translate_coords(
-            input_corners, transform_matrix_0)
-        transformed_box = Polygon(
-            zip(transformed_corners[:, 0], -transformed_corners[:, 1])
+            np.array([(0, 0), (width, 0), (width, height), (0, height)]),
+            transform_matrix_0
         )
-
-        train_corners = np.array([
-            (0, 0), (self.train_width, 0), (self.train_width, self.train_height), (0, self.train_height)])
-        diagonals_from_center = [
-            LineString([
-                (self.train_width / 2, -self.train_height / 2), (x, -y)
-            ]) for (x, y) in train_corners
-        ]
-        min_diagonal_intersect_len = min([
-            transformed_box.intersection(line).length
-            for line in diagonals_from_center
-        ])
-        crop_scale_factor = np.linalg.norm([self.train_width, self.train_height]) / min_diagonal_intersect_len / 2
+        canvas_scale_factor = self.compute_canvas_scaling(transformed_corners) if crop_inside_transformed_canvas else 1.0
         transform_matrix_1 = make_transform_matrix(
-            crop_scale_factor,
+            canvas_scale_factor,
             0,
-            (1 - crop_scale_factor) * self.train_width / 2,
-            (1 - crop_scale_factor) * self.train_height / 2
+            (1 - canvas_scale_factor) * self.train_width / 2,
+            (1 - canvas_scale_factor) * self.train_height / 2
         )
-        transform_matrix_combined = np.dot(transform_matrix_1, transform_matrix_0)
 
+        transform_matrix_combined = np.dot(transform_matrix_1, transform_matrix_0)
         transformed_image = scale_rotate_translate_img(
             img=img, m=transform_matrix_combined, crop=(self.train_width, self.train_height)
         )
+
+        if canvas_scale_factor > CANVAS_SCALING_WARN_THRESHOLD:
+            warnings.warn("Your input image could be too closely cropped, try taking a photo from further away")
 
         if not debug_mode:
             return transformed_image
